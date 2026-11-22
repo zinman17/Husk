@@ -57,17 +57,25 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Xcode 26.2 ships Swift 6.2 + the iOS 26.2 platform that the two 26.0
-  # deployment targets in Husk.xcodeproj build against. Older Xcodes fail with
-  # "iOS 26.0 is not installed" at the xcodebuild step.
-  XCODE_VERSION: '26.2'
+  # Xcode 26.4 (Swift 6.4) — required, not a preference. StikJIT.framework ships
+  # a pre-built .swiftinterface with module-qualified type names like
+  # 'Swift::String', 'Foundation::URL', 'StikJIT::StikJIT.StikJIT::Configuration'.
+  # That '::' qualified-name syntax is what Swift 6.4's compiler emits, and
+  # Swift 6.2/6.3's parser rejects it with "error: expected '{' in struct" at
+  # the first 'public struct DDIPaths : Swift::Sendable' line. There is no
+  # fallback: the framework is a vendored binary, not built from source, so
+  # the consuming compiler has to be at least the one that emitted the
+  # interface. macos-15 caps at Xcode 26.3; macos-26 has 26.4.1.
+  # HuskJITHelper also sets deploymentTarget "26.0", so the iOS 26 platform
+  # Xcode 26.4 ships is the one the build needs.
+  XCODE_VERSION: '26.4'
   HUSK_IPA: build/Husk.ipa
   HUSK_TIPA: build/Husk.tipa
 
 jobs:
   build:
     name: Build .ipa + .tipa (macOS arm64)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 150
 
     steps:
