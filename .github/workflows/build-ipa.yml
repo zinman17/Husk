@@ -91,11 +91,18 @@ jobs:
           # build_rppairing_ios.sh needs (aarch64-apple-ios).
           rustup target add aarch64-apple-ios
           # Sanity-print so a missing tool surfaces in the log, not 40 steps in.
+          # Note: rustc --version and --print target-list are mutually exclusive
+          # modes, so call them separately; and `grep` returns 1 on no match
+          # under pipefail, so use `grep -q` (we just want to confirm presence,
+          # the list itself is not useful in the log).
           meson --version
           ninja --version
           xcodegen --version
           cargo --version
-          rustc --version --print target-list | grep aarch64-apple-ios
+          rustc --version
+          rustc --print target-list | grep -q aarch64-apple-ios \
+            && echo "  ok  rust target aarch64-apple-ios present" \
+            || { echo "  MISSING rust target aarch64-apple-ios" >&2; exit 1; }
 
       - name: Cache Homebrew + build third_party
         uses: actions/cache@v4
