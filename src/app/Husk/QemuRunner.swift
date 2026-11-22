@@ -775,6 +775,67 @@ final class QemuRunner: ObservableObject {
         return Int(t.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// Probes whether a shipped snapshot's pinned guest RAM size can actually
+    /// be mapped on this device, the same way `largestMappableMiB` probes a
+    /// cold-boot candidate. Returns `true` if the snapshot's pin is safe to
+    /// honour, `false` if it would crash `qemu_init` (the silent jetsam case).
+    ///
+    /// This is the gate that stops an A13 / 4 GB device from downloading a
+    /// 2 GB pre-booted snapshot, finishing the system image download, and then
+    /// SIGKILL'ing inside `qemu_init` because 4096 MiB of anonymous memory
+    /// exceeds `os_proc_available_memory()`.
+    private func snapshotPinnedSizeFits(_ mib: Int) -> Bool {
+        // The cold-boot candidates list deliberately omits 6144 because it
+        // killed qemu_init three times regardless of probes; 5120 and 4096
+        // are in it. A snapshot pin above 5120 (none published today, but a
+        // future publish could) is treated as unverified and therefore unfit
+        // rather than crashing to find out.
+        let probeCandidates = [mib, 5120, 4096, 3584, 3072, 2560, 2048]
+            .filter { $0 <= mib }
+        // Fall back to the pin itself if the candidate list ends up empty
+        // (shouldn't happen, but a negative or zero pin shouldn't crash either).
+        let toProbe = probeCandidates.isEmpty ? [mib] : probeCandidates
+        guard let largest = largestMappableMiB(toProbe) else {
+            // Couldn't map even the smallest candidate -- the disk file is
+            // missing or unwritable, not necessarily a RAM ceiling problem.
+            // Fail open so the normal qemu_init path can surface the real
+            // error rather than the snapshot being silently retired.
+            return true
+        }
+        return largest >= mib
+    }
+
+    /// Marks an installed shipped snapshot as no longer restorable without
+    /// deleting the bytes on disk -- the user may have paid for that 2 GB
+    /// download on cellular and a future device with more RAM can still use it.
+    ///
+    /// `hasShippedSnapshot` checks the userdata qcow2's validity AND a recorded
+    /// digest / stamp; removing the stamp alone is enough to make it return
+    /// `false`, which routes `guestMemoryMiB` through the adaptive cold-boot
+    /// path and `phase1Arguments` through the non-snapshot resolution path.
+    private func retireShippedSnapshot() {
+        let guest = GuestImage.shared
+        let fm = FileManager.default
+        // The digest stamp is the modern "is this snapshot installed" signal;
+        // the generation-name stamp is the legacy one. Remove both so the
+        // next boot cold-boots regardless of which the install recorded.
+        for path in [guest.snapshotDigestPath, guest.snapshotStampPath] {
+            if fm.fileExists(atPath: path) {
+                try? fm.removeItem(atPath: path)
+                HuskLog.log("qemu", "retired shipped snapshot stamp at \(path)")
+            }
+        }
+        // The RAM-size stamp is what the cold-boot path reads to learn a
+        // *locally*-saved snapshot's size. A shipped snapshot writes this too
+        // (see GuestImage.recordSnapshotPins), and leaving it in place would
+        // make the cold-boot branch below think a snapshot still exists at the
+        // pinned size. Remove it so the adaptive probe runs cleanly.
+        if fm.fileExists(atPath: snapshotSizePath) {
+            try? fm.removeItem(atPath: snapshotSizePath)
+            HuskLog.log("qemu", "retired snapshot size stamp at \(snapshotSizePath)")
+        }
+    }
+
     /// Largest of `candidates` that can actually be mapped the way QEMU maps it.
     ///
     /// Not a PROT_NONE reservation. QEMU creates the file, extends it to the
@@ -922,9 +983,34 @@ final class QemuRunner: ObservableObject {
         // byte. No probing, no stepping down -- this number or nothing.
         if GuestImage.shared.hasShippedSnapshot {
             let mib = GuestImage.shared.snapshotPins.mib
-            QemuRunner.shared.lastGuestMiB = mib
-            HuskLog.log("qemu", "using the shipped snapshot: guest pinned to \(mib) MiB")
-            return mib
+
+            // A13 (iPhone 11, 4 GB physical) and similar low-RAM devices:
+            // the snapshot pins 4096 MiB, which the adaptive path below would
+            // never offer because os_proc_available_memory() / the mappable
+            // probe reject it. Asking qemu_init for 4096 MiB of anonymous
+            // memory on a 4 GB device blows past the jetsam ceiling before
+            // QEMU prints a single line -- the process is SIGKILL'd with no
+            // log, which looks exactly like "the app crashes after the
+            // download finishes" (see the comment at line ~283).
+            //
+            // Probe whether the pinned size can actually be mapped on THIS
+            // device before honouring it. largestMappableMiB() does a real
+            // PROT_READ|PROT_WRITE MAP_SHARED mmap and touches both ends, so
+            // it fails in exactly the cases qemu_init would. If the pinned
+            // size does not fit, retire the snapshot and fall through to the
+            // adaptive cold-boot path: a slow boot is strictly better than a
+            // silent crash on every launch.
+            if !snapshotPinnedSizeFits(mib) {
+                HuskLog.log("qemu", "shipped snapshot pins \(mib) MiB but this device "
+                                  + "cannot map that much; retiring the snapshot and "
+                                  + "booting cold instead of crashing qemu_init")
+                retireShippedSnapshot()
+                // Fall through to the adaptive budget below.
+            } else {
+                QemuRunner.shared.lastGuestMiB = mib
+                HuskLog.log("qemu", "using the shipped snapshot: guest pinned to \(mib) MiB")
+                return mib
+            }
         }
 
         // A snapshot pins the size. Restoring into a differently sized machine
