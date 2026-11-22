@@ -96,7 +96,16 @@ jobs:
           # Homebrew python3 formula does not pull pyyaml in; mako is the same
           # class of failure for the Mesa-derived meson helpers in QEMU and
           # virglrenderer. Install both into Homebrew's python3 site-packages.
-          /opt/homebrew/bin/pip3 install pyyaml mako
+          #
+          # --break-system-packages: Homebrew's python3 is PEP 668
+          # "externally-managed" (the formula ships an EXTERNALLY-MANAGED
+          # marker), so plain 'pip3 install' refuses with
+          # "error: externally-managed-environment / This environment is
+          # externally managed". The flag is PEP 668's documented escape hatch
+          # for CI and disposable runners; there is no other python3 on the
+          # macos-15 image that meson would pick up, so a venv would just add
+          # a PATH-juggling step that has to reach the same site-packages.
+          /opt/homebrew/bin/pip3 install --break-system-packages pyyaml mako
           /opt/homebrew/bin/python3 -c "import yaml, mako; print('  ok  pyyaml+mako importable')"
           # Sanity-print so a missing tool surfaces in the log, not 40 steps in.
           # Note: rustc --version and --print target-list are mutually exclusive
