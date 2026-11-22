@@ -94,7 +94,13 @@ jobs:
       - name: Install build tools (meson / ninja / xcodegen / pkg-config / cmake)
         run: |
           brew update >/dev/null
-          brew install meson ninja pkg-config xcodegen cmake libtool autoconf automake
+          # qemu is for qemu-img, which the app's "Copy Guest Resources" build
+          # phase in project.yml needs to create two qcow2 seeds the app ships:
+          # the 64 MiB UEFI vars seed and the 16 GiB userdata seed (sparse, so
+          # tiny on disk). Without qemu-img on PATH the phase dies with
+          # "error: qemu-img is required to generate the firmware and userdata
+          # seeds" and the build fails. README lists qemu-img as a build dep.
+          brew install meson ninja pkg-config xcodegen cmake libtool autoconf automake qemu
           # The Rust toolchain ships with the runner; add the iOS target that
           # build_rppairing_ios.sh needs (aarch64-apple-ios).
           rustup target add aarch64-apple-ios
