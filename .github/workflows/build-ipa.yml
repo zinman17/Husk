@@ -1,0 +1,155 @@
+# Builds Husk from a clean checkout to the IPA, on every push to main and on
+# tag pushes, produces an ad-hoc signed .ipa (for AltStore/SideStore/Feather)
+# and a .tipa (for TrollStore), and uploads both as GitHub Actions artifacts.
+#
+# No code-signing identity is required: scripts/package_ipa.sh ad-hoc signs the
+# bundle, and the sideloader re-signs it with the user's own profile at install.
+#
+# The pipeline is scripts/ci_build.sh, which runs (in order):
+#   1. fetch_sources.sh        — libffi, glib, pixman, libslirp, QEMU tarballs
+#                                 + libucontext (git clone + pinned checkout).
+#   2. build_ios.sh            — libffi glib pixman libucontext libslirp (meson
+#                                 cross-compiling for iphoneos arm64).
+#   3. build_angle_ios.sh      — ANGLE (EGL/GLES over Metal).
+#   4. build_gpu_ios.sh        — libepoxy + virglrenderer (the GL bridge QEMU
+#                                 draws through into MoltenVK/ANGLE).
+#   5. build_ios.sh qemu       — QEMU 10.0.12-utm with the iOS JIT region patch.
+#   6. integrate_husk.sh       — copies Husk's ios-jit + display bridge sources
+#                                 into the QEMU tree, patches tcg/region.c.
+#   7. build_ios.sh qemurebuild— rebuilds QEMU with Husk's sources wired in.
+#   8. fetch_phase0_guest.sh   — Alpine netboot kernel + initramfs + edk2.
+#   9. build_moltenvk_ios.sh   — MoltenVK (Vulkan over Metal, for UE4 games).
+#  10. build_rppairing_ios.sh  — Rust on-device pairing helper (aarch64-apple-ios).
+#  11. package_ipa.sh          — xcodebuild + ad-hoc sign + zip into .ipa, and
+#                                 package_ipa.sh --trollstore for the .tipa.
+#
+# Why macos-15 + Xcode 26.2:
+#   * Husk.xcodeproj pins IPHONEOS_DEPLOYMENT_TARGET=26.0 on two targets, which
+#     only Xcode 26.x can build against. macos-15 runners expose Xcode 26.x via
+#     `sudo xcode-select -s /Applications/Xcode_26.2.app`.
+#   * The runner image ships rust/cargo, python3 and brew pre-installed; we only
+#     add the iOS rust target and a handful of build tools (meson, ninja,
+#     pkg-config, xcodegen, cmake, libtool, autoconf).
+#
+# Target device: Apple A13 Bionic (iPhone 11 / SE 2 / iPad 9), 3-4 GB RAM,
+# iOS 18+, sideloaded. The build is identical across device classes; the A13
+# RAM cap is handled at runtime in QemuRunner.guestMemoryMiB().
+
+name: Build Husk IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'Screenshots/**'
+      - 'showcase/**'
+      - 'research/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref so a force-push doesn't queue.
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Xcode 26.2 ships Swift 6.2 + the iOS 26.2 platform that the two 26.0
+  # deployment targets in Husk.xcodeproj build against. Older Xcodes fail with
+  # "iOS 26.0 is not installed" at the xcodebuild step.
+  XCODE_VERSION: '26.2'
+  HUSK_IPA: build/Husk.ipa
+  HUSK_TIPA: build/Husk.tipa
+
+jobs:
+  build:
+    name: Build .ipa + .tipa (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          swift --version
+
+      - name: Install build tools (meson / ninja / xcodegen / pkg-config / cmake)
+        run: |
+          brew update >/dev/null
+          brew install meson ninja pkg-config xcodegen cmake libtool autoconf automake
+          # The Rust toolchain ships with the runner; add the iOS target that
+          # build_rppairing_ios.sh needs (aarch64-apple-ios).
+          rustup target add aarch64-apple-ios
+          # Sanity-print so a missing tool surfaces in the log, not 40 steps in.
+          meson --version
+          ninja --version
+          xcodegen --version
+          cargo --version
+          rustc --version --print target-list | grep aarch64-apple-ios
+
+      - name: Cache Homebrew + build third_party
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            third_party/sources
+            third_party/build
+            build/ios-arm64
+          key: husk-build-${{ runner.os }}-${{ hashFiles('scripts/sources.sh', 'scripts/build_ios.sh', 'scripts/build_angle_ios.sh', 'scripts/build_gpu_ios.sh', 'scripts/build_moltenvk_ios.sh') }}
+          restore-keys: |
+            husk-build-${{ runner.os }}-
+
+      - name: Build the IPA (clean checkout → .ipa + .tipa)
+        run: |
+          # ci_build.sh writes to build/Husk.ipa by default and also produces
+          # build/Husk.tipa via its final package_ipa.sh --trollstore call.
+          # It exits non-zero on any step failure, and package_ipa.sh refuses
+          # to ship a stale .app if the xcodebuild step did not print
+          # "BUILD SUCCEEDED" -- so a green exit means a real, current IPA.
+          ./scripts/ci_build.sh "$HUSK_IPA"
+
+      - name: Verify the artifacts exist and are non-trivial in size
+        run: |
+          for f in "$HUSK_IPA" "$HUSK_TIPA"; do
+            if [ ! -s "$f" ]; then
+              echo "ERROR: $f missing or empty" >&2
+              exit 1
+            fi
+            echo "  ok  $(du -h "$f" | cut -f1)  $f"
+          done
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk.ipa
+          path: ${{ env.HUSK_IPA }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload .tipa artifact (TrollStore)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk.tipa
+          path: ${{ env.HUSK_TIPA }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.HUSK_IPA }}
+            ${{ env.HUSK_TIPA }}
+          generate_release_notes: true
+          draft: true
