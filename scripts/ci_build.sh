@@ -51,6 +51,17 @@ fi
 step "on-device pairing (Rust)"
 ./scripts/build_rppairing_ios.sh
 
+# libhuskps4.dylib: the PS4 layer. The real dylib is built from two private
+# source trees (Bachata-S4 branch husk, husk-fex branch husk-fex) that are not
+# in this repo, so it cannot be built in CI. project.yml embeds the dylib
+# unconditionally (embed: true); without the file present, xcodebuild's "Embed
+# Frameworks" phase fails. The stub is idempotent -- it skips itself if a real
+# dylib is already there from build_ps4_ios.sh, so local builds with the
+# private trees are not touched. PS4 games in a CI build surface a clear
+# "not available" error instead of running; everything else is unaffected.
+step "PS4 layer stub (real libhuskps4 unavailable in CI)"
+./scripts/build_ps4_stub_ios.sh
+
 step "app + IPA"
 mkdir -p "$(dirname "$OUT")"
 ./scripts/package_ipa.sh "$OUT"
