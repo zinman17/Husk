@@ -44,6 +44,16 @@ cd "$WK/Source/ThirdParty/ANGLE"
 # matters, supportsBCTextureCompression, sits behind @available, so the warning
 # is turned off rather than the target raised. Husk deploys to 15.5 (TrollStore
 # and Dopamine devices), and ANGLE is built to match.
+#
+# Two more suppressions were added for Xcode 26.2's clang: ANGLE's
+# src/common/SimpleMutex.h annotates a std::mutex with acquire_capability /
+# release_capability, and the newer clang's -Wthread-safety-attributes rejects
+# that ("attribute requires arguments whose type is annotated with 'capability'
+# attribute; type here is 'std::mutex'") and -Wthread-safety-analysis then trips
+# on the resulting unannotated lock/unlock. With -Werror inherited from
+# WebKit's xcconfig, those warnings fail the build. They are diagnostics about
+# ANGLE's own concurrency invariants, not about Husk's use of ANGLE, so
+# suppressing them at compile time is safe and reversible.
 ALIASES="$GPU/angle-aliases.txt"
 
 angle_build () {
@@ -67,8 +77,8 @@ angle_build () {
         CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
         WK_AVAILABILITY_OVERLAY_FLAGS="" WK_AVAILABILITY_OVERLAY_SWIFT_FLAGS="" \
         IPHONEOS_DEPLOYMENT_TARGET="15.5" \
-        OTHER_CFLAGS='$(inherited) -Wno-unguarded-availability-new' \
-        OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-unguarded-availability-new' \
+        OTHER_CFLAGS='$(inherited) -Wno-unguarded-availability-new -Wno-thread-safety-attributes -Wno-thread-safety-analysis' \
+        OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-unguarded-availability-new -Wno-thread-safety-attributes -Wno-thread-safety-analysis' \
         ${ldflags[@]+"${ldflags[@]}"} \
         > "$LOG" 2>&1 \
       || { echo "ANGLE build failed; last errors:" >&2
