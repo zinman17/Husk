@@ -66,6 +66,22 @@ echo "==> virglrenderer (render server in thread mode)"
 # render-server-mode=thread, because iOS cannot spawn processes -- the same
 # constraint that makes QEMU an in-process library here. UTM uses process mode
 # on macOS and thread mode everywhere else for exactly this reason.
+#
+# -Wno-unknown-warning-option: virglrenderer's meson.build pins a list of
+# -Werror=... flags including '-Werror=enum-int-mismatch'. That flag existed
+# in clang 19 / Xcode 16 but is gone from Xcode 26.2's clang; passing it
+# there fails with "unknown warning option '-Werror=enum-int-mismatch';
+# did you mean '-Werror=return-mismatch'? [-Werror,-Wunknown-warning-option]".
+# Because meson passes -Werror=... straight through and the cross file
+# enables -Werror for feature probes, the unknown-flag diagnostic then
+# cascades into every compile check (pthread_setaffinity_np, etc.) failing.
+# -Wno-unknown-warning-option makes clang silently accept -W flags it does
+# not recognise rather than diagnosing them, so the rest of virglrenderer's
+# warning set is honoured exactly as on older toolchains and nothing else
+# changes. It does not disable any warning the compiler actually knows.
+export CFLAGS="${CFLAGS:-} -Wno-unknown-warning-option"
+export CXXFLAGS="${CXXFLAGS:-} -Wno-unknown-warning-option"
+export OBJCFLAGS="${OBJCFLAGS:-} -Wno-unknown-warning-option"
 ( cd "$GPU/virgl"
   rm -rf _build
   $MESON setup _build --cross-file "$HUSK_ROOT/build/ios-arm64/cross-ios-darwin.meson" \

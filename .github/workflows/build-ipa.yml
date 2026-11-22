@@ -90,6 +90,14 @@ jobs:
           # The Rust toolchain ships with the runner; add the iOS target that
           # build_rppairing_ios.sh needs (aarch64-apple-ios).
           rustup target add aarch64-apple-ios
+          # Python modules the meson builds need at configure time. virglrenderer
+          # (build_gpu_ios.sh) aborts with "src/gallium/meson.build:72:16: ERROR:
+          # /opt/homebrew/bin/python3 is missing modules: yaml" because the
+          # Homebrew python3 formula does not pull pyyaml in; mako is the same
+          # class of failure for the Mesa-derived meson helpers in QEMU and
+          # virglrenderer. Install both into Homebrew's python3 site-packages.
+          /opt/homebrew/bin/pip3 install pyyaml mako
+          /opt/homebrew/bin/python3 -c "import yaml, mako; print('  ok  pyyaml+mako importable')"
           # Sanity-print so a missing tool surfaces in the log, not 40 steps in.
           # Note: rustc --version and --print target-list are mutually exclusive
           # modes, so call them separately; and `grep` returns 1 on no match
